@@ -328,6 +328,7 @@ MAIN_SOURCES =                                                          \
   db/redis_test.cc                                                      \
   db/repair_test.cc                                                     \
   db/range_del_aggregator_test.cc                                       \
+  db/range_del_aggregator_bench.cc                                      \
   db/table_properties_collector_test.cc                                 \
   db/util_merge_operators_test.cc                                       \
   db/version_builder_test.cc                                            \
@@ -377,6 +378,7 @@ MAIN_SOURCES =                                                          \
   util/filelock_test.cc                                                 \
   util/log_write_bench.cc                                               \
   util/rate_limiter_test.cc                                             \
+  util/repeatable_thread_test.cc                                        \
   util/slice_transform_test.cc                                          \
   util/timer_queue_test.cc                                              \
   util/thread_list_test.cc                                              \
@@ -435,6 +437,7 @@ JNI_NATIVE_SOURCES =                                          \
   java/rocksjni/loggerjnicallback.cc                          \
   java/rocksjni/lru_cache.cc                                  \
   java/rocksjni/memtablejni.cc                                \
+  java/rocksjni/memory_util.cc                                \
   java/rocksjni/merge_operator.cc                             \
   java/rocksjni/native_comparator_wrapper_test.cc             \
   java/rocksjni/optimistic_transaction_db.cc                  \

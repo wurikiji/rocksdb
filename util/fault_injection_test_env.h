@@ -110,10 +110,24 @@ class FaultInjectionTestEnv : public EnvWrapper {
                          unique_ptr<WritableFile>* result,
                          const EnvOptions& soptions) override;
 
+  Status NewRandomAccessFile(const std::string& fname,
+                             std::unique_ptr<RandomAccessFile>* result,
+                             const EnvOptions& soptions) override;
+
   virtual Status DeleteFile(const std::string& f) override;
 
   virtual Status RenameFile(const std::string& s,
                             const std::string& t) override;
+
+  virtual Status GetFreeSpace(const std::string& path,
+                              uint64_t* disk_free) override {
+    if (!IsFilesystemActive() && error_ == Status::NoSpace()) {
+      *disk_free = 0;
+      return Status::OK();
+    } else {
+      return target()->GetFreeSpace(path, disk_free);
+    }
+  }
 
   void WritableFileClosed(const FileState& state);
 

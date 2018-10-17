@@ -1983,6 +1983,52 @@ class Benchmark {
   bool report_file_operations_;
   bool use_blob_db_;
 
+  class ErrorHandlerListener : public EventListener {
+   public:
+    ErrorHandlerListener()
+        : mutex_(),
+          cv_(&mutex_),
+          no_auto_recovery_(false),
+          recovery_complete_(false) {}
+
+    ~ErrorHandlerListener() {}
+
+    void OnErrorRecoveryBegin(BackgroundErrorReason /*reason*/,
+                              Status /*bg_error*/, bool* auto_recovery) {
+      if (*auto_recovery && no_auto_recovery_) {
+        *auto_recovery = false;
+      }
+    }
+
+    void OnErrorRecoveryCompleted(Status /*old_bg_error*/) {
+      InstrumentedMutexLock l(&mutex_);
+      recovery_complete_ = true;
+      cv_.SignalAll();
+    }
+
+    bool WaitForRecovery(uint64_t /*abs_time_us*/) {
+      InstrumentedMutexLock l(&mutex_);
+      if (!recovery_complete_) {
+        cv_.Wait(/*abs_time_us*/);
+      }
+      if (recovery_complete_) {
+        recovery_complete_ = false;
+        return true;
+      }
+      return false;
+    }
+
+    void EnableAutoRecovery(bool enable = true) { no_auto_recovery_ = !enable; }
+
+   private:
+    InstrumentedMutex mutex_;
+    InstrumentedCondVar cv_;
+    bool no_auto_recovery_;
+    bool recovery_complete_;
+  };
+
+  std::shared_ptr<ErrorHandlerListener> listener_;
+
   bool SanityCheck() {
     if (FLAGS_compression_ratio > 1) {
       fprintf(stderr, "compression_ratio should be between 0 and 1\n");
@@ -2318,6 +2364,8 @@ class Benchmark {
         }
       }
     }
+
+    listener_.reset(new ErrorHandlerListener());
   }
 
   ~Benchmark() {
@@ -2992,7 +3040,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     int64_t bytes = 0;
     int decompress_size;
     while (ok && bytes < 1024 * 1048576) {
-      char *uncompressed = nullptr;
+      CacheAllocationPtr uncompressed;
       switch (FLAGS_compression_type_e) {
         case rocksdb::kSnappyCompression: {
           // get size and allocate here to make comparison fair
@@ -3002,45 +3050,44 @@ void VerifyDBFromDB(std::string& truth_db_name) {
             ok = false;
             break;
           }
-          uncompressed = new char[ulength];
+          uncompressed = AllocateBlock(ulength, nullptr);
           ok = Snappy_Uncompress(compressed.data(), compressed.size(),
-                                 uncompressed);
+                                 uncompressed.get());
           break;
         }
       case rocksdb::kZlibCompression:
         uncompressed = Zlib_Uncompress(uncompression_ctx, compressed.data(),
                                        compressed.size(), &decompress_size, 2);
-        ok = uncompressed != nullptr;
+        ok = uncompressed.get() != nullptr;
         break;
       case rocksdb::kBZip2Compression:
         uncompressed = BZip2_Uncompress(compressed.data(), compressed.size(),
                                         &decompress_size, 2);
-        ok = uncompressed != nullptr;
+        ok = uncompressed.get() != nullptr;
         break;
       case rocksdb::kLZ4Compression:
         uncompressed = LZ4_Uncompress(uncompression_ctx, compressed.data(),
                                       compressed.size(), &decompress_size, 2);
-        ok = uncompressed != nullptr;
+        ok = uncompressed.get() != nullptr;
         break;
       case rocksdb::kLZ4HCCompression:
         uncompressed = LZ4_Uncompress(uncompression_ctx, compressed.data(),
                                       compressed.size(), &decompress_size, 2);
-        ok = uncompressed != nullptr;
+        ok = uncompressed.get() != nullptr;
         break;
       case rocksdb::kXpressCompression:
-        uncompressed = XPRESS_Uncompress(compressed.data(), compressed.size(),
-          &decompress_size);
-        ok = uncompressed != nullptr;
+        uncompressed.reset(XPRESS_Uncompress(
+            compressed.data(), compressed.size(), &decompress_size));
+        ok = uncompressed.get() != nullptr;
         break;
       case rocksdb::kZSTD:
         uncompressed = ZSTD_Uncompress(uncompression_ctx, compressed.data(),
                                        compressed.size(), &decompress_size);
-        ok = uncompressed != nullptr;
+        ok = uncompressed.get() != nullptr;
         break;
       default:
         ok = false;
       }
-      delete[] uncompressed;
       bytes += input.size();
       thread->stats.FinishedOps(nullptr, nullptr, 1, kUncompress);
     }
@@ -3500,6 +3547,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
           FLAGS_rate_limiter_auto_tuned));
     }
 
+    options.listeners.emplace_back(listener_);
     if (FLAGS_num_multi_db <= 1) {
       OpenDb(options, FLAGS_db, &db_);
     } else {
@@ -3745,7 +3793,8 @@ void VerifyDBFromDB(std::string& truth_db_name) {
 
     Duration duration(test_duration, max_ops, ops_per_stage);
     for (size_t i = 0; i < num_key_gens; i++) {
-      key_gens[i].reset(new KeyGenerator(&(thread->rand), write_mode, num_,
+      key_gens[i].reset(new KeyGenerator(&(thread->rand), write_mode,
+                                         num_ + max_num_range_tombstones_,
                                          ops_per_stage));
     }
 
@@ -3892,6 +3941,10 @@ void VerifyDBFromDB(std::string& truth_db_name) {
                   NewGenericRateLimiter(write_rate));
         }
       }
+      if (!s.ok()) {
+        s = listener_->WaitForRecovery(600000000) ? Status::OK() : s;
+      }
+
       if (!s.ok()) {
         fprintf(stderr, "put error: %s\n", s.ToString().c_str());
         exit(1);

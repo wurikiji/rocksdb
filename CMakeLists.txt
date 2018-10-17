@@ -49,6 +49,10 @@ option(WITH_SNAPPY "build with SNAPPY" OFF)
 option(WITH_LZ4 "build with lz4" OFF)
 option(WITH_ZLIB "build with zlib" OFF)
 option(WITH_ZSTD "build with zstd" OFF)
+option(WITH_WINDOWS_UTF8_FILENAMES "use UTF8 as characterset for opening files, regardles of the system code page" OFF)
+if (WITH_WINDOWS_UTF8_FILENAMES)
+  add_definitions(-DROCKSDB_WINDOWS_UTF8_FILENAMES)
+endif()
 if(MSVC)
   # Defaults currently different for GFLAGS.
   #  We will address find_package work a little later
@@ -946,6 +950,7 @@ if(WITH_TESTS)
         util/hash_test.cc
         util/heap_test.cc
         util/rate_limiter_test.cc
+        util/repeatable_thread_test.cc
         util/slice_transform_test.cc
         util/timer_queue_test.cc
         util/thread_list_test.cc
@@ -988,6 +993,7 @@ if(WITH_TESTS)
   set(BENCHMARKS
     cache/cache_bench.cc
     memtable/memtablerep_bench.cc
+    db/range_del_aggregator_bench.cc
     tools/db_bench.cc
     table/table_reader_bench.cc
     utilities/column_aware_encoding_exp.cc

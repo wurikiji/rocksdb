@@ -33,8 +33,8 @@ Status Truncate(Env* env, const std::string& filename, uint64_t length) {
   const EnvOptions options;
   Status s = env->NewSequentialFile(filename, &orig_file, options);
   if (!s.ok()) {
-    fprintf(stderr, "Cannot truncate file %s: %s\n", filename.c_str(),
-            s.ToString().c_str());
+    fprintf(stderr, "Cannot open file %s for truncation: %s\n",
+            filename.c_str(), s.ToString().c_str());
     return s;
   }
 
@@ -195,6 +195,15 @@ Status FaultInjectionTestEnv::NewWritableFile(const std::string& fname,
     list.insert(dir_and_name.second);
   }
   return s;
+}
+
+Status FaultInjectionTestEnv::NewRandomAccessFile(
+    const std::string& fname, std::unique_ptr<RandomAccessFile>* result,
+    const EnvOptions& soptions) {
+  if (!IsFilesystemActive()) {
+    return GetError();
+  }
+  return target()->NewRandomAccessFile(fname, result, soptions);
 }
 
 Status FaultInjectionTestEnv::DeleteFile(const std::string& f) {

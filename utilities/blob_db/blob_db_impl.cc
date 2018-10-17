@@ -304,13 +304,17 @@ void BlobDBImpl::CloseRandomAccessLocked(
   open_file_count_--;
 }
 
-std::shared_ptr<RandomAccessFileReader> BlobDBImpl::GetOrOpenRandomAccessReader(
-    const std::shared_ptr<BlobFile>& bfile, Env* env,
-    const EnvOptions& env_options) {
+Status BlobDBImpl::GetBlobFileReader(
+    const std::shared_ptr<BlobFile>& blob_file,
+    std::shared_ptr<RandomAccessFileReader>* reader) {
+  assert(reader != nullptr);
   bool fresh_open = false;
-  auto rar = bfile->GetOrOpenRandomAccessReader(env, env_options, &fresh_open);
-  if (fresh_open) open_file_count_++;
-  return rar;
+  Status s = blob_file->GetReader(env_, env_options_, reader, &fresh_open);
+  if (s.ok() && fresh_open) {
+    assert(*reader != nullptr);
+    open_file_count_++;
+  }
+  return s;
 }
 
 std::shared_ptr<BlobFile> BlobDBImpl::NewBlobFile(const std::string& reason) {
@@ -998,8 +1002,11 @@ Status BlobDBImpl::GetBlobValue(const Slice& key, const Slice& index_entry,
   }
 
   // takes locks when called
-  std::shared_ptr<RandomAccessFileReader> reader =
-      GetOrOpenRandomAccessReader(bfile, env_, env_options_);
+  std::shared_ptr<RandomAccessFileReader> reader;
+  s = GetBlobFileReader(bfile, &reader);
+  if (!s.ok()) {
+    return s;
+  }
 
   assert(blob_index.offset() > key.size() + sizeof(uint32_t));
   uint64_t record_offset = blob_index.offset() - key.size() - sizeof(uint32_t);
@@ -1452,8 +1459,7 @@ Status BlobDBImpl::GCFileAndUpdateLSM(const std::shared_ptr<BlobFile>& bfptr,
     return s;
   }
 
-  auto* cfh =
-      db_impl_->GetColumnFamilyHandleUnlocked(bfptr->column_family_id());
+  auto cfh = db_impl_->DefaultColumnFamily();
   auto* cfd = reinterpret_cast<ColumnFamilyHandleImpl*>(cfh)->cfd();
   auto column_family_id = cfd->GetID();
   bool has_ttl = header.has_ttl;
@@ -1732,7 +1738,11 @@ std::pair<bool, int64_t> BlobDBImpl::DeleteObsoleteFiles(bool aborted) {
 
   // directory change. Fsync
   if (file_deleted) {
-    dir_ent_->Fsync();
+    Status s = dir_ent_->Fsync();
+    if (!s.ok()) {
+      ROCKS_LOG_ERROR(db_options_.info_log, "Failed to sync dir %s: %s",
+                      blob_dir_.c_str(), s.ToString().c_str());
+    }
   }
 
   // put files back into obsolete if for some reason, delete failed

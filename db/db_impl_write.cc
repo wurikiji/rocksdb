@@ -338,8 +338,6 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
           }
         }
         write_group.last_sequence = last_sequence;
-        write_group.running.store(static_cast<uint32_t>(write_group.size),
-                                  std::memory_order_relaxed);
         write_thread_.LaunchParallelMemTableWriters(&write_group);
         in_parallel_group = true;
 
@@ -710,6 +708,10 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   assert(write_context != nullptr && need_log_sync != nullptr);
   Status status;
 
+  if (error_handler_.IsDBStopped()) {
+    status = error_handler_.GetBGError();
+  }
+
   PERF_TIMER_GUARD(write_scheduling_flushes_compactions_time);
 
   assert(!single_column_family_mode_ ||
@@ -726,10 +728,6 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
     // be flushed. We may end up with flushing much more DBs than needed. It's
     // suboptimal but still correct.
     status = HandleWriteBufferFull(write_context);
-  }
-
-  if (UNLIKELY(status.ok())) {
-    status = error_handler_.GetBGError();
   }
 
   if (UNLIKELY(status.ok() && !flush_scheduler_.Empty())) {
@@ -1162,10 +1160,14 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
     uint64_t delay = write_controller_.GetDelay(env_, num_bytes);
     if (delay > 0) {
       if (write_options.no_slowdown) {
-        return Status::Incomplete();
+        return Status::Incomplete("Write stall");
       }
       TEST_SYNC_POINT("DBImpl::DelayWrite:Sleep");
 
+      // Notify write_thread_ about the stall so it can setup a barrier and
+      // fail any pending writers with no_slowdown
+      write_thread_.BeginWriteStall();
+      TEST_SYNC_POINT("DBImpl::DelayWrite:BeginWriteStallDone");
       mutex_.Unlock();
       // We will delay the write until we have slept for delay ms or
       // we don't need a delay anymore
@@ -1182,15 +1184,25 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
         env_->SleepForMicroseconds(kDelayInterval);
       }
       mutex_.Lock();
+      write_thread_.EndWriteStall();
     }
 
-    while (!error_handler_.IsDBStopped() && write_controller_.IsStopped()) {
+    // Don't wait if there's a background error, even if its a soft error. We
+    // might wait here indefinitely as the background compaction may never
+    // finish successfully, resulting in the stall condition lasting
+    // indefinitely
+    while (error_handler_.GetBGError().ok() && write_controller_.IsStopped()) {
       if (write_options.no_slowdown) {
-        return Status::Incomplete();
+        return Status::Incomplete("Write stall");
       }
       delayed = true;
+
+      // Notify write_thread_ about the stall so it can setup a barrier and
+      // fail any pending writers with no_slowdown
+      write_thread_.BeginWriteStall();
       TEST_SYNC_POINT("DBImpl::DelayWrite:Wait");
       bg_cv_.Wait();
+      write_thread_.EndWriteStall();
     }
   }
   assert(!delayed || !write_options.no_slowdown);
@@ -1200,7 +1212,19 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
     RecordTick(stats_, STALL_MICROS, time_delayed);
   }
 
-  return error_handler_.GetBGError();
+  // If DB is not in read-only mode and write_controller is not stopping
+  // writes, we can ignore any background errors and allow the write to
+  // proceed
+  Status s;
+  if (write_controller_.IsStopped()) {
+    // If writes are still stopped, it means we bailed due to a background
+    // error
+    s = Status::Incomplete(error_handler_.GetBGError().ToString());
+  }
+  if (error_handler_.IsDBStopped()) {
+    s = error_handler_.GetBGError();
+  }
+  return s;
 }
 
 Status DBImpl::ThrottleLowPriWritesIfNeeded(const WriteOptions& write_options,
@@ -1370,8 +1394,9 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
         // of calling GetWalPreallocateBlockSize()
         lfile->SetPreallocationBlockSize(preallocate_block_size);
         lfile->SetWriteLifeTimeHint(write_hint);
-        unique_ptr<WritableFileWriter> file_writer(
-            new WritableFileWriter(std::move(lfile), log_fname, opt_env_opt));
+        unique_ptr<WritableFileWriter> file_writer(new WritableFileWriter(
+            std::move(lfile), log_fname, opt_env_opt, nullptr /* stats */,
+            immutable_db_options_.listeners));
         new_log = new log::Writer(
             std::move(file_writer), new_log_number,
             immutable_db_options_.recycle_log_file_num > 0, manual_wal_flush_);

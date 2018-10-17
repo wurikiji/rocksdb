@@ -25,6 +25,7 @@
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #endif
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
@@ -519,7 +520,8 @@ class PosixEnv : public Env {
       return Status::OK();
     }
 
-    switch (errno) {
+    int err = errno;
+    switch (err) {
       case EACCES:
       case ELOOP:
       case ENAMETOOLONG:
@@ -527,8 +529,8 @@ class PosixEnv : public Env {
       case ENOTDIR:
         return Status::NotFound();
       default:
-        assert(result == EIO || result == ENOMEM);
-        return Status::IOError("Unexpected error(" + ToString(result) +
+        assert(err == EIO || err == ENOMEM);
+        return Status::IOError("Unexpected error(" + ToString(err) +
                                ") accessing file `" + fname + "' ");
     }
   }
@@ -774,6 +776,18 @@ class PosixEnv : public Env {
 
   virtual uint64_t GetThreadID() const override {
     return gettid(pthread_self());
+  }
+
+  virtual Status GetFreeSpace(const std::string& fname,
+                              uint64_t* free_space) override {
+    struct statvfs sbuf;
+
+    if (statvfs(fname.c_str(), &sbuf) < 0) {
+      return IOError("While doing statvfs", fname, errno);
+    }
+
+    *free_space = ((uint64_t)sbuf.f_bsize * sbuf.f_bfree);
+    return Status::OK();
   }
 
   virtual Status NewLogger(const std::string& fname,
